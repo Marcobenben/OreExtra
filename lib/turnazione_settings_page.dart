@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
+import 'package:flutter/services.dart';
 
 class TurnazioneSettingsPage extends StatefulWidget {
   const TurnazioneSettingsPage({super.key});
@@ -11,97 +12,64 @@ class TurnazioneSettingsPage extends StatefulWidget {
 }
 
 class _TurnazioneSettingsPageState extends State<TurnazioneSettingsPage> {
-  String _tipoTurnazione = '6+1+1';
-  TimeOfDay _orarioStandard = const TimeOfDay(hour: 7, minute: 15);
-  DateTime? _primoRiposo;
-  int _numeroTurno = 1;
-
+  final TextEditingController _lavoroController = TextEditingController();
+  final TextEditingController _riposiController = TextEditingController();
+  final TextEditingController _orarioController = TextEditingController();
+  int? _numeroTurno;
+  DateTime? _dataPartenza;
   Map<DateTime, bool> mappaGiorni = {};
+  bool _usaTurnazione = false;
+  final TextEditingController _dataController = TextEditingController();
 
-  Future<void> _selezionaOra(BuildContext context) async {
-    final TimeOfDay? picked = await showTimePicker(
-      context: context,
-      initialTime: _orarioStandard,
-      initialEntryMode: TimePickerEntryMode.input,
-    );
-    if (picked != null) {
-      if (!mounted) return;
-      setState(() {
-        _orarioStandard = picked;
-      });
-    }
-  }
-
-  Future<void> _selezionaData(BuildContext context) async {
+  Future<void> _selezionaDataPartenza(BuildContext context) async {
     final DateTime? picked = await showDatePicker(
       context: context,
       initialDate: DateTime.now(),
       firstDate: DateTime(2020),
       lastDate: DateTime(2099),
       locale: const Locale('it', 'IT'),
+      helpText: 'Seleziona dal calendario qui sotto',
     );
-    if (!mounted) return;
-    if (picked != null) {
+    if (picked != null && mounted) {
       setState(() {
-        _primoRiposo = picked;
+        _dataPartenza = picked;
+        _dataController.text =
+        "${picked.day.toString().padLeft(2, '0')}/${picked.month.toString().padLeft(2, '0')}/${picked.year}";
       });
     }
   }
 
-
   Future<void> _salvaImpostazioni() async {
-    debugPrint('Tipo turnazione: $_tipoTurnazione');
-    debugPrint('Orario standard: ${_orarioStandard.format(context)}');
-    debugPrint('Numero turno: $_numeroTurno');
-    if (_tipoTurnazione == '6+1+1') {
-      debugPrint('Primo giorno di riposo: $_primoRiposo');
+    final giorniLavoro = int.tryParse(_lavoroController.text) ?? 0;
+    final giorniRiposo = int.tryParse(_riposiController.text) ?? 0;
+    final pattern = [
+      ...List.filled(giorniLavoro, 'L'),
+      ...List.filled(giorniRiposo, 'R')
+    ];
+    if (_dataPartenza != null) {
+      mappaGiorni = _generaMappaTurnazioneCompleta(pattern, _dataPartenza!);
+      print("Totale giorni generati: ${mappaGiorni.length}");
+      await _salvaMappaGiorni(mappaGiorni);
+      if (mounted) Navigator.pop(context, true);
     }
-
-    if (_tipoTurnazione == '6+1+1' && _primoRiposo != null) {
-      mappaGiorni = _generaMappaTurnazione6x1x1(_primoRiposo!);
-    } else if (_tipoTurnazione == '5+1+1') {
-      mappaGiorni = _generaMappaTurnazione5x1x1();
-    }
-
-    await _salvaMappaGiorni(mappaGiorni);
-
-    debugPrint('Giorni generati e salvati.');
-
-    if (!mounted) return;
-    Navigator.pop(context);
   }
 
-
-  Map<DateTime, bool> _generaMappaTurnazione6x1x1(DateTime primoRiposo) {
+  Map<DateTime, bool> _generaMappaTurnazioneCompleta(List<String> pattern, DateTime partenza) {
     final Map<DateTime, bool> mappa = {};
-    DateTime giorno = primoRiposo;
-    final DateTime fine = DateTime.utc(2090, 12, 31);
+    final DateTime inizio = DateTime(2020, 1, 1);
+    final DateTime fine = DateTime(2099, 12, 31);
+    final int offset = (partenza.difference(inizio).inDays + 1) % pattern.length;
 
-    while (giorno.isBefore(fine)) {
-      mappa[giorno] = false;
-      giorno = giorno.add(const Duration(days: 1));
-      mappa[giorno] = false;
-      giorno = giorno.add(const Duration(days: 1));
-
-      for (int i = 0; i < 6; i++) {
-        mappa[giorno] = true;
-        giorno = giorno.add(const Duration(days: 1));
-      }
-    }
-    return mappa;
-  }
-
-  Map<DateTime, bool> _generaMappaTurnazione5x1x1() {
-    final Map<DateTime, bool> mappa = {};
-    final DateTime inizio = DateTime.now();
-    final DateTime fine = DateTime.utc(2090, 12, 31);
     DateTime giorno = inizio;
+    int index = 0;
 
-    while (giorno.isBefore(fine)) {
-      final isWeekend = giorno.weekday == DateTime.saturday || giorno.weekday == DateTime.sunday;
-      mappa[giorno] = !isWeekend;
+    while (!giorno.isAfter(fine)) {
+      final patternIndex = (index - offset + pattern.length) % pattern.length;
+      mappa[giorno] = pattern[patternIndex] == 'L';
       giorno = giorno.add(const Duration(days: 1));
+      index++;
     }
+
     return mappa;
   }
 
@@ -112,51 +80,69 @@ class _TurnazioneSettingsPageState extends State<TurnazioneSettingsPage> {
         entry.key.toIso8601String().split("T")[0]: entry.value
     };
     await prefs.setString('mappaGiorniTurno', jsonEncode(stringMap));
-  }
-
-  Future<Map<DateTime, bool>> caricaMappaGiorni() async {
-    final prefs = await SharedPreferences.getInstance();
-    final String? jsonString = prefs.getString('mappaGiorniTurno');
-    if (jsonString == null) return {};
-
-    final Map<String, dynamic> jsonData = jsonDecode(jsonString);
-    final Map<DateTime, bool> result = {};
-    jsonData.forEach((key, value) {
-      result[DateTime.parse(key)] = value as bool;
-    });
-    return result;
+    debugPrint('💾 Salvati ${stringMap.length} giorni nella mappa turnazioni');
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      resizeToAvoidBottomInset: true,
       appBar: AppBar(title: const Text("Impostazioni Turnazione")),
-      body: Padding(
+      body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text("Tipo di turnazione", style: TextStyle(fontSize: 16)),
+            const Text("Compila la tua turnazione", style: TextStyle(fontSize: 16)),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _lavoroController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: "Giorni di lavoro"),
+            ),
             const SizedBox(height: 8),
-            DropdownButton<String>(
-              value: _tipoTurnazione,
-              items: const [
-                DropdownMenuItem(value: '6+1+1', child: Text('6 + 1 + 1')),
-                DropdownMenuItem(value: '5+1+1', child: Text('5 + 1 + 1')),
-              ],
-              onChanged: (value) {
-                setState(() {
-                  _tipoTurnazione = value!;
-                });
-              },
+            TextField(
+              controller: _riposiController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: "Giorni di riposo"),
             ),
             const SizedBox(height: 16),
-
-            if (_tipoTurnazione == '6+1+1') ...[
-              const Text("Turno di riferimento", style: TextStyle(fontSize: 16)),
+            const Text("Orario standard giornaliero\n(es: 07:15)", style: TextStyle(fontSize: 16)),
+            const SizedBox(height: 6),
+            TextField(
+              controller: _orarioController,
+              keyboardType: TextInputType.number,
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'[0-9:]')),
+                TextInputFormatter.withFunction((oldValue, newValue) {
+                  String digits = newValue.text.replaceAll(':', '');
+                  if (digits.length > 4) digits = digits.substring(0, 4);
+                  String formatted = digits;
+                  if (digits.length >= 3) {
+                    formatted = digits.substring(0, 2) + ':' + digits.substring(2);
+                  }
+                  return TextEditingValue(
+                    text: formatted,
+                    selection: TextSelection.collapsed(offset: formatted.length),
+                  );
+                })
+              ],
+              decoration: const InputDecoration(hintText: ''),
+            ),
+            const SizedBox(height: 16),
+            CheckboxListTile(
+              title: const Text("Segui una turnazione ciclica"),
+              value: _usaTurnazione,
+              onChanged: (val) {
+                setState(() => _usaTurnazione = val ?? false);
+              },
+            ),
+            if (_usaTurnazione) ...[
               const SizedBox(height: 8),
+              const Text("Turno di riferimento", style: TextStyle(fontSize: 16)),
               DropdownButton<int>(
                 value: _numeroTurno,
+                hint: const Text("Seleziona turno"),
                 items: const [
                   DropdownMenuItem(value: 1, child: Text('1° turno')),
                   DropdownMenuItem(value: 2, child: Text('2° turno')),
@@ -165,45 +151,22 @@ class _TurnazioneSettingsPageState extends State<TurnazioneSettingsPage> {
                 ],
                 onChanged: (value) {
                   setState(() {
-                    _numeroTurno = value!;
+                    _numeroTurno = value;
                   });
                 },
               ),
-              const SizedBox(height: 16),
             ],
-
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text("Orario standard giornaliero:", style: TextStyle(fontSize: 16)),
-                const SizedBox(height: 6),
-                ElevatedButton(
-                  onPressed: () => _selezionaOra(context),
-                  child: Text(_orarioStandard.format(context)),
-                ),
-              ],
-            ),
-
             const SizedBox(height: 16),
-
-            if (_tipoTurnazione == '6+1+1')
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text("Primo giorno di riposo:", style: TextStyle(fontSize: 16)),
-                  const SizedBox(height: 6),
-                  ElevatedButton(
-                    onPressed: () => _selezionaData(context),
-                    child: Text(
-                      _primoRiposo == null
-                          ? 'Seleziona'
-                          : '${_primoRiposo!.day}/${_primoRiposo!.month}/${_primoRiposo!.year}',
-                    ),
-                  ),
-                ],
-              ),
-
-            const Spacer(),
+            const Text("Data di inizio turno\n(primo giorno di lavoro)", style: TextStyle(fontSize: 16)),
+            const SizedBox(height: 6),
+            TextField(
+              controller: _dataController,
+              readOnly: true,
+              enableInteractiveSelection: false,
+              decoration: const InputDecoration(hintText: ''),
+              onTap: () => _selezionaDataPartenza(context),
+            ),
+            const SizedBox(height: 32),
             Center(
               child: ElevatedButton.icon(
                 onPressed: _salvaImpostazioni,
@@ -217,4 +180,3 @@ class _TurnazioneSettingsPageState extends State<TurnazioneSettingsPage> {
     );
   }
 }
-
